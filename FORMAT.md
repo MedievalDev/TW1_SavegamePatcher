@@ -22,8 +22,13 @@ length` followed by that many raw bytes (latin-1, no terminator). A
 0x0008  u32   0x2028               offset of the payload section
 0x000C  u32   4
 0x0010  u32   0
-0x0014  u32   0x3130c              (varies; screenshot-related)
-0x0018  GUID  16 B                 profile / player GUID
+0x0014  u32   PNG length           same value as at 0x2028 (98 of 98 saves)
+0x0018  GUID  16 B                 constant: the same 16 bytes in all 98
+                                   saves from 2018 to 2026, on every
+                                   character - a format GUID, not a player
+                                   or profile id. It appears nowhere else:
+                                   not in the executable, not in any
+                                   archive, not in the payload.
 0x0028  wstring "Two Worlds"       plus padding to 0x2028
 ...
 0x2028  u32   PNG length
@@ -65,15 +70,17 @@ GUID 16 B                          TwoWorlds.par, the parameter file in use
 u32  0xa0
 u32  1
 u32  mod count
+u32  0                             padding, also present when count is 0
    per mod:  dstring name ("Yamalin.wd")  +  GUID 16 B
 <script record>  × 21
 <cell block>     × 160
 ... object state, hero, inventory, world ...
 ```
 
-The mod list is descriptive only. The game does not use it to decide what to
-load; it is a record of which archives were active when the save was
-written. A retail save has count 0.
+The mod list is descriptive only, and that is measured rather than assumed:
+the 2018 retail save carries count 0, was patched without touching the list,
+and the mods still took effect in game. It is a record of which archives were
+active when the save was written, nothing more.
 
 ---
 
@@ -163,9 +170,10 @@ executable), never by path. Three consequences, all of them measured:
    No error, no message, nothing in a log — the mod appears to do nothing.
    This cost three weeks on `Test5_SDK600.wd`: the 600-quest limit never
    took effect until the archive was rebuilt with a fresh `uuid4`. The
-   official updates do the same thing; every newer version of a script in
-   `Update16.wd` carries its own GUID (38 paths compared against Updates
-   11–15).
+   official updates do the same thing: of the 37 `.eco` paths in
+   `Update16.wd`, 32 also exist in `Update11-15.wd`, and **all 32 carry a
+   different GUID** - not one is reused. Counting every file with a GUID it
+   is 33 of 33.
 2. **The GUID in the save is the link.** The patcher builds a catalogue of
    every GUID it can find — all `.wd` files in `WDFiles` plus all mods, 109
    GUIDs on a normal installation — and looks up each record's GUID in it.
