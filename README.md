@@ -43,8 +43,9 @@ texts, textures, meshes, minimaps. Those reach an old save on their own.
 
 ## Run
 
-* **Exe:** download `TW1_Savegame_Patcher.exe` from the
-  [releases page](https://github.com/MedievalDev/TW1_SavegamePatcher/releases),
+* **Exe:** download
+  [TW1_Savegame_Patcher.exe (v1.0)](https://github.com/MedievalDev/TW1_SavegamePatcher/releases/download/v1.0/TW1_Savegame_Patcher.exe)
+  from the [releases page](https://github.com/MedievalDev/TW1_SavegamePatcher/releases),
   no install. Windows SmartScreen may warn once because the file is
   unsigned (*More info → Run anyway*). Settings live in
   `%LOCALAPPDATA%\TW1SavegamePatcher\`.
