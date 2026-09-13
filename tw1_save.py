@@ -36,6 +36,7 @@ import struct
 import zlib
 
 MAGIC = b'RGMH'
+ZLIB_MAGIC = b'\x78\x9c'          # zlib, Kompressionsgrad 6 - so schreibt es das Spiel
 PAYLOAD_OFFSET = 0x2028
 _ZLIB_LEVEL = 6
 
@@ -126,6 +127,31 @@ class Save:
 def read(path):
     with open(path, 'rb') as f:
         return Save(f.read())
+
+
+def quick_title(path):
+    """Titel und Vorschaubild lesen, OHNE den zlib-Strom zu entpacken.
+
+    Der Block vor dem Strom ist eine unkomprimierte Kopie des Payload-
+    Anfangs und traegt den Titel - genau daraus liest ihn auch das Spiel
+    fuer seine Ladeliste. Kostet Millisekunden statt ~100 pro Stand.
+    Liefert (Titel, PNG-Bytes).
+    """
+    with open(path, 'rb') as f:
+        kopf = f.read(PAYLOAD_OFFSET + 4)
+        if kopf[:4] != MAGIC:
+            raise SaveError('not a TwoWorldsSave (bad magic)')
+        png_len = struct.unpack_from('<I', kopf, PAYLOAD_OFFSET)[0]
+        png = f.read(png_len)
+        vor = f.read(4096)                    # Vorschau + Anfang des Stroms
+    z = vor.find(ZLIB_MAGIC)
+    preview = vor[:z] if z >= 0 else vor
+    m = re.search(rb'([ -~]\x00){3,}', preview)
+    if not m:
+        return '', png
+    start = m.start()
+    cnt = struct.unpack_from('<I', preview, start - 4)[0]
+    return preview[start:start + cnt * 2].decode('utf-16-le', 'replace'), png
 
 
 def find_save_dir():

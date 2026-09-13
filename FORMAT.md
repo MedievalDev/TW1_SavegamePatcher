@@ -323,6 +323,20 @@ save the same question again.
 
 ---
 
+## 8a. Reading a list of saves quickly
+
+The title shown in the load list can be read **without decompressing
+anything**: the uncompressed block in front of the zlib stream is a copy of
+the payload head and carries it. `tw1_save.quick_title()` does that — 98
+saves in 0.01 s, against 0.9 s for full decompression and 11 s for a full
+plan of all of them. The window therefore lists every save immediately and
+fills in the *what would happen* column from a background thread.
+
+Tkinter only accepts calls from the thread that owns the interpreter, so the
+worker puts its results in a `queue.Queue` which the main thread drains on a
+timer. Calling `root.after` from a worker raises *main thread is not in main
+loop*.
+
 ## 9. Tools used to measure this
 
 The facts above came out of four small tools, all in the QuestForge

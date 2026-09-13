@@ -9,6 +9,7 @@ dem Skript (als Exe unter %LOCALAPPDATA%\\TW1SavePatcher).
 """
 
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -35,7 +36,8 @@ LINKS = (('GitHub-Repo', GITHUB_URL), ('Alchemy Fox', SITE_URL),
          ('Guide-Seite', GUIDE_URL), ('Community', COMMUNITY_URL))
 
 STATUS_COLOR = {'aktuell': theme.OK, 'umstellbar': theme.GOLD,
-                'teilweise': '#e0a050', 'unbekannt': theme.DIM, 'Fehler': theme.ERR}
+                'teilweise': '#e0a050', 'unbekannt': theme.DIM,
+                'offen': theme.MUT, 'Fehler': theme.ERR}
 
 
 # ---------------------------------------------------------------- Sprache --
@@ -188,12 +190,16 @@ class App:
         self.mods, self.catalog, self.scripts, self.maps, self.retail = [], {}, {}, {}, {}
         self.rows = {}
         self.plans = {}
+        self.pngs = {}
+        self.scan = 0
+        self.q = queue.Queue()
         self.bild = None
         self.guide = Guide(self)
         self.restart = False
         self.build()
         self.place_window()
         self.root.deiconify()
+        self.root.after(80, self._pump)
         self.root.after(100, self.reload_all)
         if not self.cfg.get('guide_seen'):
             self.root.after(1200, self.guide.start)
@@ -360,6 +366,13 @@ class App:
         m.add_command(label=tr('Ueber'), command=self.show_about)
 
     # ---- Aktionen ----
+    def _apply_done(self, ok, total):
+        self.log(tr('{a} von {b} umgestellt. Two Worlds jetzt neu starten.').format(a=ok, b=total),
+                 'ok' if ok == total else 'err')
+        self.btn_apply.state(['!disabled'])
+        self.set_status(tr('{a} von {b} umgestellt').format(a=ok, b=total), ok=(ok == total))
+        self.fill_list()
+
     def log(self, text, tag=None):
         self.log_box.configure(state='normal')
         self.log_box.insert('end', text + '\n', tag or ())
@@ -433,37 +446,95 @@ class App:
         self.fill_list()
 
     def fill_list(self):
+        """Zweistufig: erst alle Staende sofort anzeigen (Titel kommt aus der
+        unkomprimierten Vorschau, ~10 ms fuer 100 Staende), dann die Plaene
+        im Hintergrund nachrechnen. Vorher lief beides im Hauptfaden: das
+        Fenster stand 11 s und sah aus, als haette es nur ein paar Staende."""
         vorher = {self.rows[i][0] for i in self.tree.selection() if i in self.rows}
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
         self.plans.clear()
-        n = pending = 0
-        wieder = []
+        self.pngs.clear()
+        self.scan += 1                       # laufende Pruefung verwerfen
+        lauf = self.scan
         items = []
         for f in os.listdir(self.folder):
             if f.lower().endswith('.twoworldssave'):
                 p = os.path.join(self.folder, f)
                 items.append((os.path.getmtime(p), p))
+        wieder = []
         for mtime, p in sorted(items, reverse=True):
             try:
-                sv, steps = C.plan(p, self.game, self.mods, self.catalog, self.scripts, self.maps, self.retail)
-                st = C.status_of(steps)
-                title = sv.title
-                self.plans[p] = (sv, steps)
+                titel, png = tw1_save.quick_title(p)
+                self.pngs[p] = png
             except Exception as ex:
-                st, title = 'Fehler', f'{f}: {ex}'
-                self.plans[p] = (None, [C.Step('skip', f, str(ex), ok=False)])
-            iid = self.tree.insert('', 'end', values=(title, time.strftime('%d.%m.%Y %H:%M', time.localtime(mtime)), tr(st)), tags=(st,))
-            self.rows[iid] = (p, st)
+                titel = f'{os.path.basename(p)}: {ex}'
+            iid = self.tree.insert('', 'end', tags=('offen',), values=(
+                titel, time.strftime('%d.%m.%Y %H:%M', time.localtime(mtime)), tr('wird geprueft')))
+            self.rows[iid] = (p, 'offen')
             if p in vorher:
                 wieder.append(iid)
-            n += 1
-            pending += st in ('umstellbar', 'teilweise')
-        self.count_label.configure(text=tr('{n} Staende, {m} umstellbar').format(n=n, m=pending))
+        self.count_label.configure(text=tr('{n} Staende, {m} umstellbar').format(n=len(self.rows), m=0))
         kids = self.tree.get_children()
         if wieder or kids:
             self.tree.selection_set(wieder or kids[0])
             self.show_plan()
+        if kids:
+            self.set_status(tr('pruefe Staende ...'))
+            threading.Thread(target=self._scan, args=(lauf, list(self.rows.items())), daemon=True).start()
+        else:
+            self.set_status(tr('bereit'))
+
+    def _pump(self):
+        """Ergebnisse der Hintergrundfaeden im Hauptfaden abholen.
+
+        Tkinter erlaubt Aufrufe nur aus dem Faden, dem der Interpreter
+        gehoert - `root.after` aus einem Arbeitsfaden wirft "main thread is
+        not in main loop". Darum geht alles ueber diese Warteschlange.
+        """
+        try:
+            while True:
+                art, *rest = self.q.get_nowait()
+                if art == 'row':
+                    self._scan_row(*rest)
+                elif art == 'done':
+                    self._scan_done(*rest)
+                elif art == 'log':
+                    self.log(*rest)
+                elif art == 'applied':
+                    self._apply_done(*rest)
+        except queue.Empty:
+            pass
+        self.root.after(80, self._pump)
+
+    def _scan(self, lauf, zeilen):
+        """Hintergrund: Plan je Stand rechnen, Ergebnis in die Warteschlange."""
+        for iid, (p, _st) in zeilen:
+            if lauf != self.scan:
+                return
+            try:
+                sv, steps = C.plan(p, self.game, self.mods, self.catalog, self.scripts, self.maps, self.retail)
+                st = C.status_of(steps)
+            except Exception as ex:
+                sv, steps, st = None, [C.Step('skip', os.path.basename(p), str(ex), ok=False)], 'Fehler'
+            self.q.put(('row', lauf, iid, p, sv, steps, st))
+        self.q.put(('done', lauf))
+
+    def _scan_row(self, lauf, iid, p, sv, steps, st):
+        if lauf != self.scan or iid not in self.rows:
+            return
+        self.plans[p] = (sv, steps)
+        self.rows[iid] = (p, st)
+        self.tree.item(iid, tags=(st,))
+        self.tree.set(iid, 'status', tr(st))
+        if iid in self.tree.selection():
+            self.show_plan()
+
+    def _scan_done(self, lauf):
+        if lauf != self.scan:
+            return
+        offen = sum(1 for _p, st in self.rows.values() if st in ('umstellbar', 'teilweise'))
+        self.count_label.configure(text=tr('{n} Staende, {m} umstellbar').format(n=len(self.rows), m=offen))
         self.set_status(tr('bereit'))
 
     def show_plan(self, _ev=None):
@@ -471,22 +542,24 @@ class App:
         if not sel:
             return
         path, st = self.rows[sel[-1]]
-        sv, steps = self.plans.get(path, (None, []))
+        sv, steps = self.plans.get(path, (None, None))
         try:
-            img = tk.PhotoImage(data=sv.png)
+            img = tk.PhotoImage(data=self.pngs.get(path) or sv.png)
             if img.width() * 2 <= 260:
                 img = img.zoom(2, 2)
             self.bild = img
             self.bild_label.configure(image=img)
         except Exception:
             self.bild_label.configure(image='')
-        self.title_label.configure(text=sv.title if sv else os.path.basename(path))
+        self.title_label.configure(text=self.tree.set(sel[-1], 'name'))
         self.info_label.configure(text=f'{os.path.basename(path)}  ·  {tr(st)}')
         self.plan_box.configure(state='normal')
         self.plan_box.delete('1.0', 'end')
-        if not steps:
+        if steps is None:
+            self.plan_box.insert('end', tr('wird geprueft ...'), 'mut')
+        elif not steps:
             self.plan_box.insert('end', tr('Nichts zu tun - der Stand kennt alles, was die aktiven Mods liefern.'), 'mut')
-        for s in steps:
+        for s in steps or ():
             tag = 'skip' if s.kind == 'skip' else ('mut' if s.kind == 'info' else 'ok')
             self.plan_box.insert('end', s.what, 'gold' if tag == 'ok' else tag)
             self.plan_box.insert('end', '  ' + s.detail + '\n', tag)
@@ -512,19 +585,17 @@ class App:
         def arbeit():
             ok = 0
             for p in todo:
-                name = self.plans[p][0].title if self.plans.get(p) and self.plans[p][0] else os.path.basename(p)
-                self.root.after(0, self.log, f'{name} ({os.path.basename(p)})')
+                name = self.tree.set(next((i for i, (q, _s) in self.rows.items() if q == p), ''), 'name') \
+                    if any(q == p for q, _s in self.rows.values()) else os.path.basename(p)
+                self.q.put(('log', f'{name} ({os.path.basename(p)})', None))
                 try:
                     C.apply_plan(p, self.game, self.mods, self.catalog, self.scripts, self.maps,
-                                 log=lambda t: self.root.after(0, self.log, t), retail=self.retail)
+                                 log=lambda t: self.q.put(('log', t, None)), retail=self.retail)
                     ok += 1
-                    self.root.after(0, self.log, '  ' + tr('fertig'), 'ok')
+                    self.q.put(('log', '  ' + tr('fertig'), 'ok'))
                 except Exception as ex:
-                    self.root.after(0, self.log, '  ' + tr('FEHLER: {e}').format(e=ex), 'err')
-            self.root.after(0, self.log, tr('{a} von {b} umgestellt. Two Worlds jetzt neu starten.').format(a=ok, b=len(todo)), 'ok' if ok == len(todo) else 'err')
-            self.root.after(0, self.fill_list)
-            self.root.after(0, lambda: self.btn_apply.state(['!disabled']))
-            self.root.after(0, lambda: self.set_status(tr('{a} von {b} umgestellt').format(a=ok, b=len(todo)), ok=(ok == len(todo))))
+                    self.q.put(('log', '  ' + tr('FEHLER: {e}').format(e=ex), 'err'))
+            self.q.put(('applied', ok, len(todo)))
 
         threading.Thread(target=arbeit, daemon=True).start()
 
@@ -611,6 +682,9 @@ EN = {
         'Brings Two Worlds 1 save games up to the active mods.\nScripts with an unchanged variable block are swapped, quest scripts with a\nmigration path add their quests themselves, maps receive their markers.',
     'Guide': 'Guide', 'Beim Start nicht mehr anzeigen': "Don't show at startup", 'Zurueck': 'Back', 'Weiter': 'Next', 'Fertig': 'Finish',
     'Schritt {n} von {m}': 'Step {n} of {m}',
+    'wird geprueft': 'checking',
+    'wird geprueft ...': 'checking ...',
+    'pruefe Staende ...': 'checking saves ...',
     'aktuell': 'current', 'umstellbar': 'patchable', 'teilweise': 'partial', 'unbekannt': 'unknown', 'Fehler': 'error',
     'Willkommen': 'Welcome', 'Spielstaende': 'Save games', 'Danach': 'Afterwards',
     'Dieses Werkzeug hebt vorhandene Spielstaende auf die Mods, die gerade aktiv sind - so, als haettest du mit den Mods neu angefangen, nur mit deinem alten Fortschritt.':
